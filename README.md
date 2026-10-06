@@ -141,10 +141,10 @@ python scripts/check_services.py
 
 ```bash
 # مسیر دیتاست را خودتان می‌دهید (فایل یا پوشه)
-python scripts/embed_dataset.py --data /path/to/data.csv
+python scripts/embed_dataset.py --data data/data.csv
 
 # فقط دیدن گزارش چانکینگ بدون امبدینگ:
-python scripts/embed_dataset.py --data /path/to/data.csv --preview
+python scripts/embed_dataset.py --data data/data.csv --preview
 
 # تنظیم چانکینگ (پیش‌فرض‌ها: ۴ پاراگراف در هر چانک + ۱ پاراگراف هم‌پوشانی)
 python scripts/embed_dataset.py --data data/data.csv --paragraphs 5 --overlap 2

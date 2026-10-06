@@ -2,3 +2,4 @@ streamlit>=1.36
 faiss-cpu>=1.8.0
 numpy>=1.24
 requests>=2.31
+pypdf>=6.19.0

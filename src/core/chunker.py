@@ -15,7 +15,7 @@
 """
 
 from __future__ import annotations
-
+import io
 import csv
 import logging
 import re
@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .exceptions import DatasetError
 from .models import Chunk, Document
-
+csv.field_size_limit(2**30)
 logger = logging.getLogger("rag.chunker")
 
 # جداسازی پاراگراف: یک خط خالی (فقط فاصله/تب)
@@ -66,9 +66,21 @@ class CSVLoader:
             raise DatasetError("هیچ سند معتبری در دیتاست پیدا نشد (همه ردیف‌ها خالی‌اند؟).")
         return documents
 
+
     def _load_single(self, file: Path) -> list[Document]:
         documents: list[Document] = []
-        with file.open("r", encoding="utf-8-sig", newline="") as handle:
+
+        # بایت‌های NUL (مثلاً از استخراج PDF) باعث «line contains NUL» می‌شوند؛
+        # قبل از پارس CSV حذفشان می‌کنیم.
+        raw = file.read_bytes()
+        nul_count = raw.count(b"\x00")
+        if nul_count:
+            logger.warning("فایل «%s» شامل %d بایت NUL بود و پاک‌سازی شد.",
+                           file.name, nul_count)
+            raw = raw.replace(b"\x00", b"")
+        text = raw.decode("utf-8-sig", errors="replace")
+
+        with io.StringIO(text, newline="") as handle:
             reader = csv.DictReader(handle)
             if not reader.fieldnames:
                 raise DatasetError(f"فایل «{file.name}» سطر هدر ندارد.")

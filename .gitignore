@@ -3,13 +3,10 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
-
-# محرمانگی/تنظیمات محلی
+.idea/
 .env
-
-# خروجی‌های اجرا
 storage/index/
 storage/history.db
-
-# فایل‌های سیستم
 .DS_Store
+pdfs/
+data/
