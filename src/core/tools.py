@@ -70,11 +70,15 @@ class ToolRegistry:
     """
 
     def __init__(self, retriever: Retriever, vector_store: VectorStore,
-                 tool_result_max_chars: int = 3000, chunk_preview_chars: int = 1200):
+                 tool_result_max_chars: int = 3000, chunk_preview_chars: int = 1200,
+                 default_top_k: int = 5):
         self.retriever = retriever
         self.vector_store = vector_store
         self.tool_result_max_chars = tool_result_max_chars
         self.chunk_preview_chars = chunk_preview_chars
+        # پیش‌فرض تعداد نتایج وقتی مدل خودش top_k تعیین نکند؛
+        # از تنظیمات سایدبار UI مقداردهی می‌شود.
+        self.default_top_k = max(1, int(default_top_k))
 
     # ── تعاریف ──────────────────────────────────────────────
     @staticmethod
@@ -104,12 +108,13 @@ class ToolRegistry:
             return ToolExecutionResult(text=f"خطا در اجرای ابزار «{call.name}»: {exc}")
 
     # ── ابزار ۱: جست‌وجوی معنایی ─────────────────────────────
-    def _run_search_knowledge_base(self, query: str = "", top_k: int = 5
+    def _run_search_knowledge_base(self, query: str = "", top_k: int | None = None
                                    ) -> ToolExecutionResult:
         query = str(query).strip()
         if not query:
             return ToolExecutionResult(text="خطا: پارامتر query خالی است.")
-        top_k = self._clamp_int(top_k, 1, 15, default=5)
+        chosen = self.default_top_k if top_k is None else top_k
+        top_k = self._clamp_int(chosen, 1, 15, default=self.default_top_k)
         if not self.vector_store.is_ready():
             return ToolExecutionResult(
                 text="دانش‌نامه هنوز ساخته نشده است؛ ایندکس FAISS خالی است."

@@ -1,16 +1,20 @@
 """
-خط لولهٔ اصلی RAG
-=================
-جریان کاملِ پاسخ‌دهی، دقیقاً مطابق نیاز پروژه:
+خط لولهٔ اصلی RAG — نسخهٔ «ابزار-محور» (Tool-Call-First)
+========================================================
+جریان جدید پاسخ‌دهی، مطابق نیاز پروژه:
 
-    پرامپت کاربر
-        → امبد شدن (سرویس bge-m3)
-        → retrieve (جست‌وجو در ایندکس FAISS)
-        → نشستن نتایج در کانتکست پیام کاربر
-        → تولید پاسخ توسط مدل (Qwen3)
-        → (در صورت نیاز) فراخوانی ابزار جستجو توسط خودِ مدل،
-          دریافت نتیجه و ادامهٔ تولید تا پاسخ نهایی
+    پیام کاربر
+        → ارسال مستقیم به مدل (بدون هیچ امبدینگ یا جست‌وجوی خودکار!)
+        → خودِ مدل تصمیم می‌گیرد که آیا به دانش‌نامه نیاز دارد یا نه
+        → در صورت نیاز: فراخوانی ابزار search_knowledge_base (قالب hermes)
+           ← در همین مرحله پرس‌وجو امبد می‌شود و FAISS جست‌وجو می‌شود
+        → نتیجهٔ ابزار به مدل برمی‌گردد و تولید ادامه می‌یابد
+        → (در صورت نیاز) دوباره فراخوانی ابزار تا سقف max_tool_calls
         → پاسخ نهایی + منابع استفاده‌شده
+
+نتیجهٔ مهم: اگر به مدل «سلام» بگویید، هیچ متنی به سرویس امبدینگ
+فرستاده نمی‌شود؛ چون مدل ابزار را فراخوانی نمی‌کند. امبدینگ فقط و
+فقط داخل اجرای ابزار و با تصمیم خودِ مدل اتفاق می‌افتد.
 
 کلاس ‎RAGPipeline‎ اجزا را هماهنگ می‌کند و برای هر پرس‌وجو یک
 ‎PipelineRun‎ می‌سازد که هم قابل استریم است و هم نتیجهٔ کامل
@@ -26,20 +30,18 @@ from typing import Callable, Iterator
 from ..config import Settings
 from .api_client import LLMClient
 from .models import PipelineResult
-from .prompts import (build_context_block, build_system_prompt,
-                      build_tool_response_message, build_user_prompt)
-from .retriever import Retriever
+from .prompts import build_system_prompt, build_tool_response_message
 from .tool_parsing import StreamMaskFilter, parse_tool_calls, strip_blocks
 from .tools import ToolRegistry
 
 logger = logging.getLogger("rag.pipeline")
 
 # ── رویدادهایی که UI می‌تواند روی آن‌ها واکنش نشان دهد ──────────────
-EVENT_RETRIEVAL_DONE = "retrieval_done"   # جست‌وجوی اولیه انجام شد (count)
-EVENT_TOOL_CALL = "tool_call"             # مدل ابزاری را صدا زد (name, arguments)
-EVENT_TOOL_RESULT = "tool_result"         # نتیجهٔ ابزار آماده شد (name, summary)
-EVENT_LLM_ROUND = "llm_round"             # دور جدید تولید (round, forced_final)
-EVENT_WARNING = "warning"                 # هشدار غیرمهلک (message)
+EVENT_TOOL_CALL = "tool_call"       # مدل ابزاری را صدا زد (name, arguments)
+EVENT_TOOL_RESULT = "tool_result"   # نتیجهٔ ابزار آماده شد (name, summary)
+EVENT_LLM_ROUND = "llm_round"       # دور جدید تولید (round, forced_final)
+EVENT_THINKING = "thinking"         # مدل وارد/خارج بلوک تفکر شد (active)
+EVENT_WARNING = "warning"           # هشدار غیرمهلک (message)
 
 
 class PipelineRun:
@@ -53,11 +55,10 @@ class PipelineRun:
     """
 
     def __init__(self, pipeline: "RAGPipeline", question: str, history: list[dict],
-                 top_k: int | None = None, temperature: float | None = None):
+                 temperature: float | None = None):
         self.pipeline = pipeline
         self.question = question
         self.history = history
-        self.top_k = top_k or pipeline.settings.default_top_k
         self.temperature = (pipeline.settings.temperature
                             if temperature is None else temperature)
         self.result = PipelineResult()
@@ -74,30 +75,20 @@ class PipelineRun:
 
     # ── اجرای اصلی ──────────────────────────────────────────
     def stream(self) -> Iterator[str]:
-        """مولد متن پاسخ؛ هم‌زمان result را کامل می‌کند."""
+        """مولد متن پاسخ؛ هم‌زمان result را کامل می‌کند.
+
+        نکته: برخلاف نسخهٔ قبلی، هیچ بازیابیِ خودکاری در ابتدا انجام
+        نمی‌شود. پیام کاربر خام به مدل می‌رود و فقط اگر مدل ابزار را
+        فراخوانی کند، جست‌وجوی معنایی (امبد + FAISS) اجرا می‌شود.
+        """
         settings = self.pipeline.settings
 
         messages: list[dict] = [{"role": "system", "content": build_system_prompt()}]
         messages.extend(self.history)
+        messages.append({"role": "user", "content": self.question})
 
-        # ۱) امبدینگ پرس‌وجوی کاربر + retrieve (RAG خودکار)
-        context_results = []
-        try:
-            context_results = self.pipeline.retriever.search(self.question, self.top_k)
-            self.result.sources.extend(context_results)
-            self.emit(EVENT_RETRIEVAL_DONE, count=len(context_results))
-        except Exception as exc:  # noqa: BLE001 — سرویس امبدینگ نباید کل پاسخ را بکشد
-            logger.exception("جست‌وجوی اولیه ناموفق بود.")
-            self.result.add_warning(f"جست‌وجوی اولیه انجام نشد: {exc}")
-            self.emit(EVENT_WARNING, message=self.result.warnings[-1])
-
-        user_prompt = build_user_prompt(
-            self.question,
-            build_context_block(context_results, settings.max_context_chars),
-        )
-        messages.append({"role": "user", "content": user_prompt})
-
-        # ۲) حلقهٔ مدل + ابزار (حداکثر max_tool_calls بار فراخوانی)
+        # حلقهٔ مدل + ابزار (حداکثر max_tool_calls بار فراخوانی)
+        tool_names = tuple(self.pipeline.tools.tool_names())
         display_parts: list[str] = []
         total_rounds = settings.max_tool_calls + 1
         try:
@@ -112,18 +103,28 @@ class PipelineRun:
                     })
 
                 # دور تولید مدل — جریانی برای کاربر، خام برای تحلیل ابزار
-                mask = StreamMaskFilter()
+                mask = StreamMaskFilter(tool_names=tool_names)
                 collected: list[str] = []
                 visible_text = ""
+                was_inside_block = False
                 for token in self.pipeline.llm.chat_stream(
                     messages, temperature=self.temperature,
                     max_tokens=settings.max_tokens,
                 ):
                     collected.append(token)
                     piece = mask.feed(token)
+                    # گزارش ورود/خروج به بلوک تفکر برای نمایش وضعیت در UI
+                    # (بلافاصله بعد از feed تا گذارها همان لحظه منتشر شوند)
+                    inside_block = mask.inside_block
+                    if inside_block != was_inside_block:
+                        self.emit(EVENT_THINKING, active=inside_block)
+                        was_inside_block = inside_block
                     if piece:
                         visible_text += piece
                         yield piece
+                if was_inside_block:
+                    # اگر جریان داخل بلوک تمام شد، وضعیت را ببند
+                    self.emit(EVENT_THINKING, active=False)
                 tail = mask.flush()
                 if tail:
                     visible_text += tail
@@ -131,15 +132,17 @@ class PipelineRun:
                 raw_text = "".join(collected)
 
                 # آیا مدل ابزاری فراخوانی کرده است؟
-                calls = [] if forced_final else parse_tool_calls(raw_text)
+                # (هم بلوک تگ‌دار و هم JSON خالیِ بدون تگ پشتیبانی می‌شود)
+                calls = ([] if forced_final
+                         else parse_tool_calls(raw_text, tool_names=tool_names))
                 if not calls:
                     self.result.answer = self._compose_answer(
-                        display_parts, visible_text, raw_text
+                        display_parts, visible_text, raw_text, tool_names
                     )
                     self.result.finished = True
                     return
 
-                # ۳) اجرای ابزارها و برگرداندن نتیجه به مدل
+                # اجرای ابزارها و برگرداندن نتیجه به مدل
                 messages.append({"role": "assistant", "content": raw_text})
                 for call in calls:
                     self.result.tool_calls.append(call)
@@ -156,7 +159,7 @@ class PipelineRun:
                     display_parts.append(visible_text.strip())
 
             # عملاً به اینجا نمی‌رسیم؛ برای اطمینان:
-            self.result.answer = self._compose_answer(display_parts, "", "")
+            self.result.answer = self._compose_answer(display_parts, "", "", tool_names)
             self.result.finished = True
 
         except Exception as exc:  # noqa: BLE001
@@ -169,29 +172,31 @@ class PipelineRun:
     # ── کمکی‌ها ─────────────────────────────────────────────
     @staticmethod
     def _compose_answer(display_parts: list[str], visible_text: str,
-                        raw_text: str) -> str:
+                        raw_text: str, tool_names=()) -> str:
         """ترکیب متن‌های قابل‌نمایش دورهای مختلف در یک پاسخ نهایی."""
         parts = [part for part in display_parts if part and part.strip()]
         if visible_text and visible_text.strip():
             parts.append(visible_text.strip())
         answer = "\n\n".join(parts).strip()
         if not answer:
-            answer = strip_blocks(raw_text).strip()
+            answer = strip_blocks(raw_text, tool_names).strip()
         return answer
 
 
 class RAGPipeline:
-    """هماهنگ‌کنندهٔ اجزای RAG (مدل، بازیاب، ابزارها، تنظیمات)."""
+    """هماهنگ‌کنندهٔ اجزای RAG (مدل، ابزارها، تنظیمات).
 
-    def __init__(self, llm: LLMClient, retriever: Retriever, tools: ToolRegistry,
-                 settings: Settings):
+    نکتهٔ معماری: بازیاب (Retriever) دیگر مستقیماً در خط لوله استفاده
+    نمی‌شود؛ جست‌وجوی معنایی فقط از طریق ‎ToolRegistry‎ و با فراخوانی
+    خودِ مدل اجرا می‌شود.
+    """
+
+    def __init__(self, llm: LLMClient, tools: ToolRegistry, settings: Settings):
         self.llm = llm
-        self.retriever = retriever
         self.tools = tools
         self.settings = settings
 
     def create_run(self, question: str, history: list[dict] | None = None,
-                   top_k: int | None = None,
                    temperature: float | None = None) -> PipelineRun:
         """ساخت یک اجرای خط لوله برای سوال داده‌شده."""
-        return PipelineRun(self, question, history or [], top_k, temperature)
+        return PipelineRun(self, question, history or [], temperature)

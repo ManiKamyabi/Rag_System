@@ -48,21 +48,28 @@ def mock_embedding(text: str) -> list[float]:
 
 
 # ═══════════════════════════ منطق چت ═══════════════════════════
+# سبک فراخوانی ابزار: tagged (با تگ hermes) یا bare (فقط JSON بدون تگ)
+TOOL_STYLE = "tagged"
+
+
 def mock_chat_reply(messages: list[dict]) -> str:
     """پاسخ ساختگی مدل برای تست حلقهٔ ابزار RAG."""
-    has_tool_response = any("<tool_response>" in (m.get("content") or "") for m in messages)
+    has_tool_response = any(
+        "<tool_response>" in (m.get("content") or "")
+        for m in messages if m.get("role") == "user"
+    )
     if has_tool_response:
         return (
             "بر اساس جست‌وجو در دانش‌نامه، این پاسخ نهاییِ آزمایشی است و "
             "محتوا از فایل test.pdf بازیابی شده است. (پاسخ تولیدشده توسط سرور آزمایشی)"
         )
     # هنوز ابزار فراخوانی نشده → مدل یک فراخوانی ابزار شبیه‌سازی می‌کند
-    return (
-        "برای پاسخ بهتر اجازه بده در دانش‌نامه جست‌وجو کنم.\n"
-        "<tool_call>\n"
-        '{"name": "search_knowledge_base", "arguments": {"query": "متن آزمایشی", "top_k": 3}}'
-        "\n</tool_call>"
-    )
+    call = ('{"name": "search_knowledge_base", '
+             '"arguments": {"query": "متن آزمایشی", "top_k": 3}}')
+    intro = "برای پاسخ بهتر اجازه بده در دانش‌نامه جست‌وجو کنم.\n\n"
+    if TOOL_STYLE == "bare":
+        return intro + call + "\n"
+    return intro + "<tool_call>\n" + call + "\n</tool_call>\n"
 
 
 # ═══════════════════════════ هندلر HTTP ═══════════════════════════
@@ -159,9 +166,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="سرور آزمایشی سازگار با OpenAI")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)
+    parser.add_argument("--style", choices=["tagged", "bare"], default="tagged",
+                        help="سبک فراخوانی ابزار در پاسخ ساختگی (پیش‌فرض: tagged)")
     args = parser.parse_args()
+    global TOOL_STYLE
+    TOOL_STYLE = args.style
     server = ThreadingHTTPServer((args.host, args.port), MockHandler)
-    print(f"سرور آزمایشی روی http://{args.host}:{args.port} بالا آمد …")
+    print(f"سرور آزمایشی روی http://{args.host}:{args.port} بالا آمد … (style={TOOL_STYLE})")
     print("endpoints: GET /health | POST /v1/chat/completions | POST /v1/embeddings")
     try:
         server.serve_forever()

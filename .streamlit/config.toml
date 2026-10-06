@@ -1,0 +1,13 @@
+# تم سراسری Streamlit — هماهنگ با استایل سفارشی src/ui/app.py
+[theme]
+base = "light"
+primaryColor = "#6366F1"
+backgroundColor = "#F4F6FB"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#000000"
+
+[server]
+maxUploadSize = 200
+
+[browser]
+gatherUsageStats = false
