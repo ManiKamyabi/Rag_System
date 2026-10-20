@@ -9,4 +9,3 @@ storage/index/
 storage/history.db
 .DS_Store
 pdfs/
-data/
