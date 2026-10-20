@@ -292,3 +292,6 @@ python scripts/mock_server.py --port 8090
 python scripts/embed_dataset.py --data data/data.csv
 python run_app.py
 ```
+## 🎬 مشاهده نمونه اجرای پروژه
+
+[▶️ Watch IoT Chatbot Demo](https://drive.google.com/file/d/1YT4owcNI5Yds8aMhGWzKiVqm9oc69jUz/view?usp=sharing)
